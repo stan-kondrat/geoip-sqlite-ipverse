@@ -1,0 +1,65 @@
+name: Update IP Database
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get IPverse latest release timestamp
+        id: ipverse
+        run: |
+          RELEASE=$(curl -s https://api.github.com/repos/ipverse/country-ip-blocks/releases/latest)
+          PUBLISHED_AT=$(echo "$RELEASE" | jq -r '.published_at')
+          # Derive a safe release tag from the timestamp, e.g. 2024-03-15T120000Z
+          TAG="ipverse-$(echo "$PUBLISHED_AT" | sed 's/[:-]//g' | sed 's/T/T/' | cut -c1-17)Z"
+          echo "published_at=$PUBLISHED_AT" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"                   >> "$GITHUB_OUTPUT"
+
+      - name: Check if we already built this version
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ steps.ipverse.outputs.tag }}")
+          if [ "$STATUS" = "200" ]; then
+            echo "exists=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        if: steps.check.outputs.exists == 'false'
+        run: sudo apt-get install -y sqlite3 jq
+
+      - name: Build database
+        if: steps.check.outputs.exists == 'false'
+        run: ./geoip-sqlite-ipverse.sh
+
+      - name: Publish as GitHub Release asset
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.ipverse.outputs.tag }}" \
+            --title "IPverse ${{ steps.ipverse.outputs.tag }}" \
+            --notes "Auto-built SQLite database from IPverse data published at \`${{ steps.ipverse.outputs.published_at }}\`.
+
+          **Schema:** split \`ip_blocks_v4\` / \`ip_blocks_v6\` tables with integer CIDR ranges for fast lookups.
+
+          **Download:** \`ip_to_country.db\` asset below." \
+            build/ip_to_country.db
+
+      - name: Already up to date
+        if: steps.check.outputs.exists == 'true'
+        run: echo "Already up to date (IPverse published_at=${{ steps.ipverse.outputs.published_at }})."
